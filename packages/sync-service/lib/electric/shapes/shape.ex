@@ -169,6 +169,9 @@ defmodule Electric.Shapes.Shape do
     queryable_columns: [type: {:or, [{:list, :string}, nil]}],
     params: [type: {:map, :string, :string}, default: %{}],
     autofill_pk_select?: [type: :boolean, default: false],
+    # A subquery's columns are compared by position with the row on the left of its `IN`, so
+    # their order is part of its meaning and is kept as written.
+    keep_column_order?: [type: :boolean, default: false],
     replica: [
       type: {:custom, __MODULE__, :verify_replica, []},
       default: :default
@@ -336,6 +339,7 @@ defmodule Electric.Shapes.Shape do
              shared_opts
              |> Map.put(:select, subquery)
              |> Map.put(:autofill_pk_select?, true)
+             |> Map.put(:keep_column_order?, true)
              |> Map.put(:log_mode, :full)
              |> new() do
         comparable_shape = comparable(shape_dependency)
@@ -372,17 +376,12 @@ defmodule Electric.Shapes.Shape do
       relation = {shape.root_table_id, shape.root_table}
 
       with {:ok, column_info, _} <- load_column_info(relation, inspector) do
-        type =
-          column_info
-          |> Enum.filter(&(&1.name in shape.explicitly_selected_columns))
-          |> Inspector.columns_to_expr()
-          |> Map.to_list()
-          |> case do
-            [{_, type}] ->
-              type
+        types = Inspector.columns_to_expr(column_info)
 
-            multiple ->
-              {:row, Enum.map(multiple, &elem(&1, 1))}
+        type =
+          case Enum.map(shape.explicitly_selected_columns, &Map.fetch!(types, [&1])) do
+            [type] -> type
+            multiple -> {:row, multiple}
           end
 
         {:ok, Map.put(acc, ["$sublink", "#{i}"], {:array, type})}
@@ -491,8 +490,13 @@ defmodule Electric.Shapes.Shape do
 
     all_columns = Enum.uniq(columns_to_select ++ pk_cols)
 
+    explicitly_selected =
+      if Map.fetch!(opts, :keep_column_order?),
+        do: columns_to_select,
+        else: Enum.sort(columns_to_select)
+
     if is_nil(err_msg) do
-      {:ok, Enum.sort(all_columns), Enum.sort(columns_to_select)}
+      {:ok, Enum.sort(all_columns), explicitly_selected}
     else
       {:error, {:columns, [err_msg]}}
     end

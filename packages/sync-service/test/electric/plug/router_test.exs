@@ -3199,6 +3199,61 @@ defmodule Electric.Plug.RouterTest do
                Task.await(task)
     end
 
+    # The subquery's columns are not in alphabetical order, and no row holds the same value
+    # in both, so a comparison by the wrong position matches nothing.
+    @tag with_sql: [
+           "CREATE TABLE statuses (id INT PRIMARY KEY, project_id TEXT NOT NULL, key TEXT NOT NULL, open BOOLEAN NOT NULL)",
+           "CREATE TABLE tasks (id INT PRIMARY KEY, project_id TEXT NOT NULL, status TEXT NOT NULL)",
+           "INSERT INTO statuses VALUES (1, 'p1', 'todo', TRUE), (2, 'p1', 'done', FALSE), (3, 'p2', 'todo', FALSE)",
+           "INSERT INTO tasks VALUES (1, 'p1', 'todo'), (2, 'p1', 'done'), (3, 'p2', 'todo')"
+         ]
+    test "subqueries compare composite columns in the order they are written", ctx do
+      orig_req =
+        make_shape_req("tasks",
+          where:
+            "(project_id, status) IN (SELECT project_id, key FROM statuses WHERE open = TRUE)"
+        )
+
+      assert {req, 200, response} = shape_req(orig_req, ctx.opts)
+
+      # The row's tag hashes its own values in the order the row is written
+      open_tag = value_tag(ctx.stack_id, req.handle, "project_id:v:p1" <> "status:v:todo")
+
+      assert [%{"headers" => %{"tags" => [^open_tag]}, "value" => %{"id" => "1"}}] =
+               Enum.filter(response, &Map.has_key?(&1, "key"))
+
+      # A status that opens moves its tasks in
+      task = live_shape_req(req, ctx.opts)
+      Postgrex.query!(ctx.db_conn, "UPDATE statuses SET open = TRUE WHERE id = 3")
+
+      moved_in_tag = value_tag(ctx.stack_id, req.handle, "project_id:v:p2" <> "status:v:todo")
+
+      assert {req, 200,
+              [
+                %{"headers" => %{"event" => "move-in"}},
+                %{"headers" => %{"tags" => [^moved_in_tag]}, "value" => %{"id" => "3"}},
+                %{"headers" => %{"control" => "snapshot-end"}},
+                up_to_date_ctl()
+              ]} =
+               Task.await(task)
+
+      # and one that closes moves them out
+      task = live_shape_req(req, ctx.opts)
+      Postgrex.query!(ctx.db_conn, "UPDATE statuses SET open = FALSE WHERE id = 1")
+
+      assert {_, 200,
+              [
+                %{
+                  "headers" => %{
+                    "event" => "move-out",
+                    "patterns" => [%{"pos" => 0, "value" => ^open_tag}]
+                  }
+                },
+                _
+              ]} =
+               Task.await(task)
+    end
+
     @tag with_sql: [
            "CREATE TABLE parent (id INT PRIMARY KEY, value INT NOT NULL, other_value INT NOT NULL)",
            "CREATE TABLE child (id INT PRIMARY KEY, value INT NOT NULL, other_value INT NOT NULL)",
