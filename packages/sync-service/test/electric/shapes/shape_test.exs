@@ -984,6 +984,35 @@ defmodule Electric.Shapes.ShapeTest do
   end
 
   describe "subquery dependency construction" do
+    test "keeps the written column order of a composite subquery" do
+      inspector =
+        Support.StubInspector.new(%{
+          "tasks" => [
+            %{name: "id", pk_position: 0},
+            %{name: "project_id", type: "int8", type_id: {20, -1}},
+            %{name: "status"}
+          ],
+          "statuses" => [
+            %{name: "id", pk_position: 0},
+            %{name: "project_id", type: "int8", type_id: {20, -1}},
+            %{name: "key"}
+          ]
+        })
+
+      assert {:ok,
+              %Shape{
+                where: %{
+                  query: "(project_id, status) IN (SELECT project_id, key FROM public.statuses)",
+                  used_refs: %{["$sublink", "0"] => {:array, {:row, [:int8, :text]}}}
+                },
+                shape_dependencies: [%Shape{explicitly_selected_columns: ["project_id", "key"]}]
+              }} =
+               Shape.new("tasks",
+                 inspector: inspector,
+                 where: "(project_id, status) IN (SELECT project_id, key FROM statuses)"
+               )
+    end
+
     test "does not deduplicate subqueries with different projected columns" do
       inspector =
         Support.StubInspector.new(%{
